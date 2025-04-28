@@ -56,22 +56,30 @@ def analyze_layer_sensitivity(model_name="gpt2-large", output_file="layer_sensit
     # Use only the specified number of examples
     test_inputs = test_inputs[:num_examples]
     
-    # Tokenize inputs
+    # Tokenize inputs and prepare labels for loss calculation
     encoded_inputs = []
     for text in test_inputs:
         encoded = tokenizer(text, return_tensors="pt").to(device)
+        # For GPT-2, labels are the same as input_ids for calculating loss
+        encoded['labels'] = encoded.input_ids.clone()
         encoded_inputs.append(encoded)
+    
+    # Function to evaluate perplexity
+    def calculate_perplexity(model, encoded):
+        with torch.no_grad():
+            outputs = model(**encoded)
+            # Access loss directly from outputs
+            loss = outputs.loss
+            perplexity = torch.exp(loss).item()
+            return perplexity
     
     # Evaluate baseline performance
     baseline_perplexities = []
     
     print("Calculating baseline performance...")
-    with torch.no_grad():
-        for encoded in encoded_inputs:
-            outputs = model(**encoded)
-            loss = outputs.loss
-            perplexity = torch.exp(loss).item()
-            baseline_perplexities.append(perplexity)
+    for encoded in encoded_inputs:
+        perplexity = calculate_perplexity(model, encoded)
+        baseline_perplexities.append(perplexity)
     
     avg_baseline_perplexity = sum(baseline_perplexities) / len(baseline_perplexities)
     print(f"Baseline average perplexity: {avg_baseline_perplexity:.4f}")
@@ -139,17 +147,24 @@ def analyze_layer_sensitivity(model_name="gpt2-large", output_file="layer_sensit
         # Apply modified weights
         with torch.no_grad():
             for name, tensor in modified_weights.items():
-                getattr(layer, name.split('.')[0])[int(name.split('.')[1]) if '.' in name else 0].copy_(tensor)
+                # Handle nested parameter names correctly
+                parts = name.split('.')
+                if len(parts) == 1:
+                    # Direct attribute of layer
+                    setattr(layer, name, tensor)
+                else:
+                    # Nested attribute
+                    obj = layer
+                    for part in parts[:-1]:
+                        obj = getattr(obj, part)
+                    setattr(obj, parts[-1], tensor)
         
         # Evaluate performance with flipped bits
         perplexities = []
         
-        with torch.no_grad():
-            for encoded in encoded_inputs:
-                outputs = model(**encoded)
-                loss = outputs.loss
-                perplexity = torch.exp(loss).item()
-                perplexities.append(perplexity)
+        for encoded in encoded_inputs:
+            perplexity = calculate_perplexity(model, encoded)
+            perplexities.append(perplexity)
         
         avg_perplexity = sum(perplexities) / len(perplexities)
         perplexity_increase = avg_perplexity - avg_baseline_perplexity
@@ -166,7 +181,17 @@ def analyze_layer_sensitivity(model_name="gpt2-large", output_file="layer_sensit
         # Restore original weights
         with torch.no_grad():
             for name, tensor in layer_weights.items():
-                getattr(layer, name.split('.')[0])[int(name.split('.')[1]) if '.' in name else 0].copy_(tensor)
+                # Handle nested parameter names correctly
+                parts = name.split('.')
+                if len(parts) == 1:
+                    # Direct attribute of layer
+                    setattr(layer, name, tensor)
+                else:
+                    # Nested attribute
+                    obj = layer
+                    for part in parts[:-1]:
+                        obj = getattr(obj, part)
+                    setattr(obj, parts[-1], tensor)
         
         print(f"Layer {layer_idx}: Perplexity increase: {perplexity_increase:.4f}")
     
