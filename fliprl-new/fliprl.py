@@ -197,6 +197,7 @@ class FlipRL:
         
         return perturbed_weights
     
+    # Update to the evaluate_accuracy function in fliprl.py
     def evaluate_accuracy(self, eval_data):
         """Evaluate model accuracy on the evaluation dataset."""
         self.model.eval()
@@ -208,10 +209,13 @@ class FlipRL:
                 # Tokenize input
                 input_ids = self.tokenizer(item["input"], return_tensors="pt").to(self.device)
                 
-                # Generate output
+                # Get input length and set max_new_tokens appropriately
+                input_length = input_ids.input_ids.shape[1]
+                
+                # Generate output using max_new_tokens instead of max_length
                 output = self.model.generate(
                     **input_ids, 
-                    max_length=50, 
+                    max_new_tokens=50,  # Only generate up to 50 new tokens
                     num_return_sequences=1,
                     pad_token_id=self.tokenizer.eos_token_id
                 )
