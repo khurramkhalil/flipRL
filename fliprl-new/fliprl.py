@@ -82,22 +82,28 @@ class FlipRL:
         batch_indices = np.random.choice(len(eval_data), batch_size, replace=False)
         batch = [eval_data[i] for i in batch_indices]
         
-        # Tokenize the batch
-        inputs = self.tokenizer([item["input"] for item in batch], return_tensors="pt", padding=True).to(self.device)
-        labels = self.tokenizer([item["output"] for item in batch], return_tensors="pt", padding=True)["input_ids"].to(self.device)
-        
         # Clear existing gradients
         self.model.zero_grad()
         
-        # Forward pass
-        outputs = self.model(**inputs, labels=labels)
-        loss = outputs.loss
+        # Process each input separately to avoid batch size mismatch
+        layer_gradients = {}
+        accumulated_gradients = {}
         
-        # Backward pass to compute gradients
-        loss.backward()
+        for item in batch:
+            # Tokenize single input
+            inputs = self.tokenizer(item["input"], return_tensors="pt").to(self.device)
+            
+            # For GPT-2, we use the same input as the target (shifted by 1)
+            labels = inputs.input_ids.clone()
+            
+            # Forward pass
+            outputs = self.model(**inputs, labels=labels)
+            loss = outputs.loss / batch_size  # Scale the loss by batch size for proper accumulation
+            
+            # Backward pass to compute gradients
+            loss.backward()
         
         # Extract gradients for the specific layer
-        layer_gradients = {}
         for name, param in self.model.transformer.h[layer_idx].named_parameters():
             if param.grad is not None:
                 layer_gradients[name] = param.grad.clone().detach()
