@@ -262,8 +262,8 @@ def analyze_layer_sensitivity(model_name="gpt2-large", output_file="layer_sensit
                 for name, original_tensor in original_state_dict.items():
                     if name in layer_params:
                          layer_params[name].data.copy_(original_tensor)
-            # Clear gradients for the next iteration
-            model.zero_grad()
+        # Clear gradients for the next iteration
+        model.zero_grad()
 
 
         # Store results
