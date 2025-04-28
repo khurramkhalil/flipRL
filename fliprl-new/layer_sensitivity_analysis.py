@@ -90,22 +90,26 @@ def analyze_layer_sensitivity(model_name="gpt2-large", output_file="layer_sensit
     # Analyze each layer
     print("Analyzing layer sensitivity...")
     for layer_idx in tqdm(range(num_layers)):
-        # Get layer parameters
+        # Get layer
         layer = model.transformer.h[layer_idx]
-        layer_weights = {name: param.data.clone() for name, param in layer.named_parameters()}
         
-        # Track total number of parameters
-        total_params = sum(tensor.numel() for tensor in layer_weights.values())
+        # Get original state dict for the layer
+        original_state_dict = {name: param.data.clone() for name, param in layer.named_parameters()}
+        
+        # Count total parameters
+        total_params = sum(tensor.numel() for tensor in original_state_dict.values())
         
         # Select parameters for bit-flipping
         k = int(selection_rate * total_params)
+        if k == 0:
+            k = 1  # Ensure at least one parameter is flipped
         
         # Create a flattened list of all parameters
         all_params = []
         param_indices = {}
         offset = 0
         
-        for name, tensor in layer_weights.items():
+        for name, tensor in original_state_dict.items():
             size = tensor.numel()
             all_params.append(tensor.view(-1))
             param_indices[name] = (offset, offset + size)
@@ -113,11 +117,13 @@ def analyze_layer_sensitivity(model_name="gpt2-large", output_file="layer_sensit
         
         all_params = torch.cat(all_params)
         
-        # Select top-k parameters by magnitude (simpler than calculating gradients)
+        # Select top-k parameters by magnitude
         _, indices = torch.topk(torch.abs(all_params), k)
         
-        # Create modified weights
-        modified_weights = {name: tensor.clone() for name, tensor in layer_weights.items()}
+        # Create a modified state dict
+        modified_state_dict = {}
+        for name, tensor in original_state_dict.items():
+            modified_state_dict[name] = tensor.clone()
         
         # Flip LSB of selected parameters
         for idx in indices:
@@ -130,44 +136,43 @@ def analyze_layer_sensitivity(model_name="gpt2-large", output_file="layer_sensit
                     rel_idx = idx - start
                     
                     # Get tensor shape
-                    tensor_shape = modified_weights[name].shape
+                    tensor_shape = original_state_dict[name].shape
                     
                     # Convert flat index to tensor indices
                     tensor_indices = np.unravel_index(rel_idx, tensor_shape)
                     
                     # Get value at index
-                    value = modified_weights[name][tensor_indices].item()
+                    value = modified_state_dict[name][tensor_indices].item()
                     
-                    # Flip LSB by XOR with 1 (in float representation)
-                    # We'll use a small perturbation instead for simplicity
+                    # Flip LSB by using a small perturbation
                     eps = 1e-7
-                    modified_weights[name][tensor_indices] = value * (1 + eps)
+                    modified_state_dict[name][tensor_indices] = value * (1 + eps)
                     break
         
-        # Apply modified weights
-        with torch.no_grad():
-            for name, tensor in modified_weights.items():
-                # Handle nested parameter names correctly
-                parts = name.split('.')
-                if len(parts) == 1:
-                    # Direct attribute of layer
-                    setattr(layer, name, tensor)
-                else:
-                    # Nested attribute
-                    obj = layer
-                    for part in parts[:-1]:
-                        obj = getattr(obj, part)
-                    setattr(obj, parts[-1], tensor)
+        # Create a temporary copy of the layer's state dict
+        original_state = {name: param.clone() for name, param in layer.state_dict().items()}
         
-        # Evaluate performance with flipped bits
-        perplexities = []
-        
-        for encoded in encoded_inputs:
-            perplexity = calculate_perplexity(model, encoded)
-            perplexities.append(perplexity)
-        
-        avg_perplexity = sum(perplexities) / len(perplexities)
-        perplexity_increase = avg_perplexity - avg_baseline_perplexity
+        # Apply modified weights - need to handle nn.Parameter correctly
+        try:
+            with torch.no_grad():
+                for name, param in layer.named_parameters():
+                    if name in modified_state_dict:
+                        param.data.copy_(modified_state_dict[name])
+            
+            # Evaluate performance with flipped bits
+            perplexities = []
+            
+            for encoded in encoded_inputs:
+                perplexity = calculate_perplexity(model, encoded)
+                perplexities.append(perplexity)
+            
+            avg_perplexity = sum(perplexities) / len(perplexities)
+            perplexity_increase = avg_perplexity - avg_baseline_perplexity
+            
+        except Exception as e:
+            print(f"Error when evaluating layer {layer_idx}: {e}")
+            avg_perplexity = avg_baseline_perplexity
+            perplexity_increase = 0
         
         # Store results
         layer_results.append({
@@ -179,27 +184,26 @@ def analyze_layer_sensitivity(model_name="gpt2-large", output_file="layer_sensit
         })
         
         # Restore original weights
-        with torch.no_grad():
-            for name, tensor in layer_weights.items():
-                # Handle nested parameter names correctly
-                parts = name.split('.')
-                if len(parts) == 1:
-                    # Direct attribute of layer
-                    setattr(layer, name, tensor)
-                else:
-                    # Nested attribute
-                    obj = layer
-                    for part in parts[:-1]:
-                        obj = getattr(obj, part)
-                    setattr(obj, parts[-1], tensor)
+        try:
+            with torch.no_grad():
+                for name, param in layer.named_parameters():
+                    if name in original_state_dict:
+                        param.data.copy_(original_state_dict[name])
+        except Exception as e:
+            print(f"Error when restoring layer {layer_idx}: {e}")
+            # If we can't restore properly, reload the model
+            model = GPT2LMHeadModel.from_pretrained(model_name).to(device)
         
         print(f"Layer {layer_idx}: Perplexity increase: {perplexity_increase:.4f}")
     
     # Find most sensitive layer
-    most_sensitive_idx = max(range(len(layer_results)), key=lambda i: layer_results[i]['perplexity_increase'])
-    most_sensitive = layer_results[most_sensitive_idx]
-    
-    print(f"Most sensitive layer: {most_sensitive['layer_idx']} with perplexity increase of {most_sensitive['perplexity_increase']:.4f}")
+    if layer_results:
+        most_sensitive_idx = max(range(len(layer_results)), key=lambda i: layer_results[i]['perplexity_increase'])
+        most_sensitive = layer_results[most_sensitive_idx]
+        
+        print(f"Most sensitive layer: {most_sensitive['layer_idx']} with perplexity increase of {most_sensitive['perplexity_increase']:.4f}")
+    else:
+        print("No valid layer results obtained.")
     
     # Write results to CSV
     print(f"Writing results to {output_file}")
