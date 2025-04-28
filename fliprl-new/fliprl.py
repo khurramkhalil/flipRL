@@ -10,10 +10,11 @@ import warnings
 warnings.filterwarnings("ignore")
 
 class FlipRL:
+    # Update to the __init__ function in FlipRL class to set the pad token
     def __init__(self, model_name="gpt2-large", alpha=0.5, selection_rate=0.001, 
-                 device="cuda" if torch.cuda.is_available() else "cpu",
-                 rl_learning_rate=0.1, rl_discount_factor=0.9, 
-                 rl_exploration_rate=0.1, rl_generations=10):
+                device="cuda" if torch.cuda.is_available() else "cpu",
+                rl_learning_rate=0.1, rl_discount_factor=0.9, 
+                rl_exploration_rate=0.1, rl_generations=10):
         """
         Initialize the FlipRL framework.
         
@@ -41,6 +42,10 @@ class FlipRL:
         print(f"Initializing FlipRL with {model_name} on {device}")
         self.model = GPT2LMHeadModel.from_pretrained(model_name).to(device)
         self.tokenizer = GPT2Tokenizer.from_pretrained(model_name)
+        
+        # Set padding token for the tokenizer (necessary for batch processing)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
         
         # Set model to evaluation mode
         self.model.eval()
